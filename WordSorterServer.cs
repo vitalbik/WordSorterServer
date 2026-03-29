@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 
 class WordSorterServer
 {
@@ -12,14 +13,13 @@ class WordSorterServer
 
     public static void Main()
     {
-        Int32 port = 15000;
-        IPAddress localAddr = IPAddress.Parse("127.0.0.1");
+        string portStr = Environment.GetEnvironmentVariable("PORT") ?? "15000";
+        int port = int.Parse(portStr);
 
-        listener = new TcpListener(localAddr, port);
+        listener = new TcpListener(IPAddress.Any, port);
         listener.Start();
 
-        Console.WriteLine("Сервер запущен на порту 15000");
-        Console.WriteLine("Ожидание подключений...\n");
+        Console.WriteLine("Сервер запущен на порту " + port);
 
         while (true)
         {
@@ -36,36 +36,75 @@ class WordSorterServer
 
         try
         {
-            StreamReader sr = new StreamReader(client.GetStream());
-            StreamWriter sw = new StreamWriter(client.GetStream());
+            Stream stream = client.GetStream();
+            StreamReader sr = new StreamReader(stream);
+            StreamWriter sw = new StreamWriter(stream);
             sw.AutoFlush = true;
 
+            string firstLine = sr.ReadLine();
+            if (firstLine == null) return;
+
+            Console.WriteLine("Получен запрос: " + firstLine);
+
+            // Если это HTTP запрос (от Render для проверки)
+            if (firstLine.StartsWith("HEAD") || firstLine.StartsWith("GET"))
+            {
+                // Читаем оставшиеся заголовки
+                while (!string.IsNullOrEmpty(sr.ReadLine())) { }
+
+                // Отвечаем HTTP 200 OK
+                sw.WriteLine("HTTP/1.1 200 OK");
+                sw.WriteLine("Content-Length: 0");
+                sw.WriteLine("Connection: close");
+                sw.WriteLine();
+                return;
+            }
+
+            // Если это POST запрос с текстом для сортировки
+            if (firstLine.StartsWith("POST"))
+            {
+                int contentLength = 0;
+                string line;
+
+                // Читаем заголовки
+                while (!string.IsNullOrEmpty(line = sr.ReadLine()))
+                {
+                    if (line.ToLower().StartsWith("content-length:"))
+                        contentLength = int.Parse(line.Substring(15).Trim());
+                }
+
+                // Читаем тело запроса
+                char[] body = new char[contentLength];
+                sr.Read(body, 0, contentLength);
+                string text = new string(body);
+
+                Console.WriteLine("Текст для сортировки: " + text);
+
+                // Сортируем слова
+                string result = SortWords(text);
+
+                // Отправляем HTTP ответ
+                byte[] responseBytes = Encoding.UTF8.GetBytes(result);
+                sw.WriteLine("HTTP/1.1 200 OK");
+                sw.WriteLine("Content-Type: text/plain; charset=utf-8");
+                sw.WriteLine("Content-Length: " + responseBytes.Length);
+                sw.WriteLine("Connection: close");
+                sw.WriteLine();
+                sw.Write(result);
+                return;
+            }
+
+            // Обычный TCP клиент (не HTTP)
+            string inputText = firstLine;
             while (true)
             {
-                // Читаем текст от клиента
-                string text = sr.ReadLine();
+                if (string.IsNullOrEmpty(inputText)) break;
 
-                // Пустая строка или null = клиент отключился
-                if (string.IsNullOrEmpty(text)) break;
+                string sorted = SortWords(inputText);
+                sw.WriteLine(sorted);
+                sw.WriteLine("---");
 
-                Console.WriteLine("Получен текст: " + text);
-
-                // Разбиваем на слова, убираем повторения, сортируем
-                string[] words = text.Split(
-                    new char[] { ' ', ',', '.', '!', '?', ';', ':', '-' },
-                    StringSplitOptions.RemoveEmptyEntries
-                );
-
-                List<string> sorted = words
-                    .Select(w => w.ToLower())   // всё в нижний регистр
-                    .Distinct()                  // убираем повторения
-                    .OrderBy(w => w)             // сортируем по алфавиту
-                    .ToList();
-
-                // Отправляем слова клиенту — каждое с новой строки
-                string result = string.Join("\n", sorted);
-                sw.WriteLine(result);
-                sw.WriteLine("---"); // маркер конца ответа
+                inputText = sr.ReadLine();
             }
         }
         catch (Exception e)
@@ -73,7 +112,23 @@ class WordSorterServer
             Console.WriteLine("Ошибка: " + e.Message);
         }
 
-        Console.WriteLine("Клиент отключился: " + client.Client.RemoteEndPoint);
         client.Close();
+        Console.WriteLine("Клиент отключился");
+    }
+
+    static string SortWords(string text)
+    {
+        string[] words = text.Split(
+            new char[] { ' ', ',', '.', '!', '?', ';', ':', '-', '\r', '\n' },
+            StringSplitOptions.RemoveEmptyEntries
+        );
+
+        List<string> sorted = words
+            .Select(w => w.ToLower())
+            .Distinct()
+            .OrderBy(w => w)
+            .ToList();
+
+        return string.Join("\n", sorted);
     }
 }
